@@ -9,11 +9,13 @@ import org.slf4j.LoggerFactory
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
 import com.google.cloud.storage.BlobInfo
+import com.google.cloud.storage.BucketInfo
 import java.nio.charset.StandardCharsets.UTF_8
 import org.modeshape.jcr.value.binary.FileSystemBinaryStore
 import org.modeshape.jcr.value.binary.StoredBinaryValue
 import org.modeshape.jcr.value.binary.TransientBinaryStore
 import java.io.ByteArrayInputStream
+import java.lang.IllegalStateException
 import java.nio.channels.Channels
 
 
@@ -26,7 +28,7 @@ class GoogleCloudStorageBinaryStore() : AbstractBinaryStore() {
 
     private val storage = StorageOptions.getDefaultInstance().service
 
-    private val bucketName = "bht-demo-modeshape"
+    var bucketName:String = ""
 
     private val fileSystemCache: FileSystemBinaryStore = TransientBinaryStore.get()
 
@@ -35,6 +37,7 @@ class GoogleCloudStorageBinaryStore() : AbstractBinaryStore() {
     }
 
     override fun storeExtractedText(source: BinaryValue, extractedText: String) {
+        validateConfiguration()
         val blobId = BlobId.of(bucketName, "${source.key}-$ExtractedTextSuffix")
         val blobInfo = BlobInfo.newBuilder(blobId).setContentType("text/plain").build()
         storage.create(blobInfo, extractedText.toByteArray(UTF_8))
@@ -48,18 +51,22 @@ class GoogleCloudStorageBinaryStore() : AbstractBinaryStore() {
         if (blob != null && blob.exists()) {
             log.warn("Request to upload a blob that already exists! Ignoring...")
         } else {
-            val blobInfo = BlobInfo.newBuilder(blobId).setContentType(cachedFile.mimeType).build()
-            storage.create(blobInfo, stream.readBytes())
+            val blobInfo = BlobInfo.newBuilder(blobId)
+                    .setContentType(cachedFile.mimeType)
+                    .setMetadata(mapOf(Pair("key",key.toString())))
+                    .build()
+            storage.create(blobInfo, cachedFile.stream.readBytes())
         }
         fileSystemCache.markAsUnused(listOf(cachedFile.key))
         return StoredBinaryValue(this, key, cachedFile.size)
     }
 
     override fun markAsUsed(keys: MutableIterable<BinaryKey>?) {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        // Nothing to do here; if the file is used - we stored it already.
     }
 
     override fun getStoredMimeType(binaryValue: BinaryValue): String {
+        validateConfiguration()
         val blob = storage.get(BlobId.of(bucketName, binaryValue.key.toString()))
         return blob.contentType
     }
@@ -69,18 +76,24 @@ class GoogleCloudStorageBinaryStore() : AbstractBinaryStore() {
     }
 
     override fun removeValuesUnusedLongerThan(minimumAge: Long, unit: TimeUnit?) {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        log.info("Requested to remove unused values that have expired age limit. This is not required for GCS.")
     }
 
     override fun getAllBinaryKeys(): MutableIterable<BinaryKey> {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        validateConfiguration()
+        val bucket = storage.get(bucketName)
+        val blobs = bucket.list()
+        return blobs.iterateAll().map { blob -> BinaryKey(blob.metadata["key"]) }.toMutableList()
     }
 
-    override fun markAsUnused(keys: MutableIterable<BinaryKey>?) {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+    override fun markAsUnused(keys: MutableIterable<BinaryKey>) {
+        validateConfiguration()
+        val blobIds = keys.map { key -> BlobId.of(bucketName, key.toString()) }
+        storage.delete(blobIds)
     }
 
     override fun getInputStream(key: BinaryKey): InputStream {
+        validateConfiguration()
         val blobId = BlobId.of(bucketName, key.toString())
         val blob = storage.get(blobId)
         return if(blob != null && blob.exists()) {
@@ -97,6 +110,12 @@ class GoogleCloudStorageBinaryStore() : AbstractBinaryStore() {
             String(blob.getContent(), UTF_8)
         } else {
             ""
+        }
+    }
+
+    private fun validateConfiguration() {
+        if(bucketName == "") {
+            throw IllegalStateException("BucketName has not been configured.")
         }
     }
 }
